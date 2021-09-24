@@ -183,34 +183,40 @@ class GrouperCombined(Grouper):
         self.expression = expression
         # efficient way to find the original bin values (parent.bin_value) from the 'compressed'
         # self.bin_values
-        df = vaex.from_dict({'row': vaex.vrange(0, self.N, dtype='i8'), 'bin_value': self.bin_values})
-        df[f'index_0'] = df['bin_value'] // multipliers[0]
-        df[f'leftover_0'] = df[f'bin_value'] % multipliers[0]
-        for i in range(1, len(multipliers)):
-            df[f'index_{i}'] = df[f'leftover_{i-1}'] // multipliers[i]
-            df[f'leftover_{i}'] = df[f'leftover_{i-1}'] % multipliers[i]
-        columns = [f'index_{i}' for i in range(len(multipliers))]
-        indices_parents = df.evaluate(columns)
-        def compress(ar):
-            if vaex.dtype_of(ar).kind == 'i':
-                ar = vaex.array_types.to_numpy(ar)
-                max_value = ar.max()
-                ar = ar.astype(vaex.utils.required_dtype_for_max(max_value))
-                return ar
-        indices_parents = [compress(ar) for ar in indices_parents]
-        bin_values = {}
-        # NOTE: we can also use dict encoding instead of take
-        for indices, parent in zip(indices_parents, parents):
-            dtype = vaex.dtype_of(parent.bin_values)
-            if dtype.is_struct:
-                # collapse parent struct into our flat struct
-                for field, ar in zip(parent.bin_values.type, parent.bin_values.flatten()):
-                    bin_values[field.name] = ar.take(indices)
-                    # bin_values[field.name] = pa.DictionaryArray.from_arrays(indices, ar)
-            else:
-                bin_values[parent.label] = parent.bin_values.take(indices)
-                # bin_values[parent.label] = pa.DictionaryArray.from_arrays(indices, parent.bin_values)
-        self.bin_values = pa.StructArray.from_arrays(bin_values.values(), bin_values.keys())
+        def lookup_originals():
+            df = vaex.from_dict({'row': vaex.vrange(0, self.N, dtype='i8'), 'bin_value': self.bin_values})
+            df[f'index_0'] = df['bin_value'] // multipliers[0]
+            df[f'leftover_0'] = df[f'bin_value'] % multipliers[0]
+            for i in range(1, len(multipliers)):
+                df[f'index_{i}'] = df[f'leftover_{i-1}'] // multipliers[i]
+                df[f'leftover_{i}'] = df[f'leftover_{i-1}'] % multipliers[i]
+            columns = [f'index_{i}' for i in range(len(multipliers))]
+            indices_parents = df.evaluate(columns)
+            def compress(ar):
+                if vaex.dtype_of(ar).kind == 'i':
+                    ar = vaex.array_types.to_numpy(ar)
+                    max_value = ar.max()
+                    ar = ar.astype(vaex.utils.required_dtype_for_max(max_value))
+                    return ar
+            indices_parents = [compress(ar) for ar in indices_parents]
+            bin_values = {}
+            # NOTE: we can also use dict encoding instead of take
+            for indices, parent in zip(indices_parents, parents):
+                dtype = vaex.dtype_of(parent.bin_values)
+                if dtype.is_struct:
+                    # collapse parent struct into our flat struct
+                    for field, ar in zip(parent.bin_values.type, parent.bin_values.flatten()):
+                        bin_values[field.name] = ar.take(indices)
+                        # bin_values[field.name] = pa.DictionaryArray.from_arrays(indices, ar)
+                else:
+                    bin_values[parent.label] = parent.bin_values.take(indices)
+                    # bin_values[parent.label] = pa.DictionaryArray.from_arrays(indices, parent.bin_values)
+            return pa.StructArray.from_arrays(bin_values.values(), bin_values.keys())
+        def key_function():
+            fp = vaex.cache.fingerprint(expression.fingerprint())
+            return f'groupby-combined-{fp}'
+        lookup_originals = vaex.cache._memoize(lookup_originals, key_function=key_function)
+        self.bin_values = lookup_originals()
 
 
 class GrouperCategory(BinnerBase):
